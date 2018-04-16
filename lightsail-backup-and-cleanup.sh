@@ -1,47 +1,76 @@
 #!/bin/bash
 
-######################################
-##   CREATE A NEW SNAPSHOT BACKUP   ##
-######################################
-## This script takes in three arguments the name of your instance, the region, and the number of snapshots to keep.
+log_file="./snapshot.log"
+instance_name=$1
+backup_name="autosnap-${instance_name}-$(date +%Y-%m-%d_%H.%M)"
+instance_region=$2
+snapshots_to_keep=$3
 
-NameOfYourInstance=$1
-NameOfYourBackup=$NameOfYourInstance
-Region=$2
+fn_log_item() {
+  logString=${*}
+  echo "$(date +"%Y-%m-%d-%H%M%S") ${logString}" 2>&1 | tee -a ${log_file}
+}
 
-aws lightsail create-instance-snapshot --instance-snapshot-name ${NameOfYourBackup}-$(date +%Y-%m-%d_%H.%M) --instance-name $NameOfYourInstance --region $Region
+fn_terminate_script() {
+	fn_log_item "SIGINT caught."
+	exit 1
+}
 
-## Delay before initiating clean up of old snapshots
+fn_abort() {
+  errString=${*}
+  fn_log_item "$errString"
+  exit 1
+}
+
+trap 'fn_terminate_script' SIGINT
+
+fn_log_item "Starting Snapshot script"
+
+# Check inputs
+if [[ ${#} -ne 3 ]]
+then
+	echo "Usage: $0 instanceName instance_region snapshots_to_keep"
+	fn_abort "arguments provided not equal to 3. Exiting."
+fi
+
+if [[ -n ${3//[0-9]/} ]]; then
+    echo "Please ensure you enter a number for the 3rd argument, to specify how many snapshots to keep."
+		fn_abort "3rd argument is not an integer. Exiting."
+fi
+
+# Create backup
+aws lightsail create-instance-snapshot --instance-snapshot-name ${backup_name} --instance-name $instance_name --region $instance_region
+
+fn_log_item "Backup created: ${backup_name}"
+
+
 sleep 30
-
-##############################
-##   DELETE OLD SNAPSHOTS   ##
-##############################
-# Set number of snapshots you'd like to keep in your account
-snapshotsToKeep=$3
-echo "Number of Instance Snapshots to keep: ${snapshotsToKeep}"
-
-# get the total number of available Lightsail snapshots
-numberOfSnapshots=$(aws lightsail get-instance-snapshots | jq '[.[]  | select(.[].fromInstanceName == "'${NameOfYourInstance}'") ]| length')
-echo "Number of instance snapshots: ${numberOfSnapshots}"
-
+# Cleanup old backups
 # get the names of all snapshots sorted from old to new
-SnapshotNames=$(aws lightsail get-instance-snapshots | jq '.[] | sort_by(.createdAt) | select(.[0].fromInstanceName == "'${NameOfYourInstance}'") | .[].name')
+snapshot_names=$(aws lightsail get-instance-snapshots | jq '.instanceSnapshots | map(select(.name|startswith("'autosnap-${instance_name}'"))) | .[].name')
+
+# Filter snapshots, so we only look at ones created by the script
+number_of_snapshots=$(echo "$snapshot_names" | wc -l)
+fn_log_item "Snapshots to keep  : ${snapshots_to_keep}"
+fn_log_item "Current # snapshots: ${number_of_snapshots}"
 
 # loop through all snapshots
-while IFS= read -r line 
-do 
+while IFS= read -r line
+do
 let "i++"
 
 	# delete old snapshots condition
-	if (($i <= $numberOfSnapshots-$snapshotsToKeep))
+	if (($i <= $number_of_snapshots-$snapshots_to_keep))
 	then
-		snapshotToDelete=$(echo "$line" | tr -d '"')
+		snapshot_to_delete=$(echo "$line" | tr -d '"')
 
 		# delete snapshot command
-		aws lightsail delete-instance-snapshot --instance-snapshot-name $snapshotToDelete 
+		aws lightsail delete-instance-snapshot --instance-snapshot-name $snapshot_to_delete
+		fn_log_item "Backup deleted: ${snapshot_to_delete}"
 	fi
 
-done <<< "$SnapshotNames"
+done <<< "$snapshot_names"
 
-exit 1
+fn_log_item "Snapshot script completed"
+
+exit 0
